@@ -17,11 +17,11 @@ import glob
 # -- file paths --
 long_description="""PaCNet: Python implementation of PaCNet"""
 setup(
-    name='colanet',
+    name='pacnet',
     version='100.100.100',
     description='A python implementation of PaCNet',
     long_description=long_description,
-    url='https://github.com/gauenk/cola_net',
+    url='https://github.com/gauenk/pacnet',
     author='Kent Gauen',
     author_email='gauenk@purdue.edu',
     license='MIT',
