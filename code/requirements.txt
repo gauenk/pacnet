@@ -1,4 +1,0 @@
-matplotlib
-opencv_python
-torch
-numpy
