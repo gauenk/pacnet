@@ -18,16 +18,16 @@ def run(vid, min_i,nsearch=15,ps=15,ps_f=7):
     vid = rearrange(vid,'t c h w -> 1 c t h w')
     device = vid.device
     pad_r = (ps_f//2) + ps_f
-    print("pad_r: ",pad_r)
+    # print("pad_r: ",pad_r)
     reflect_pad = (0, pad_r, pad_r)
     pad = (nsearch-1)//2
-    print("pad: ",pad)
+    # print("pad: ",pad)
     const_pad = (pad, pad, pad, pad, 3, 3)
     with th.no_grad():
         vid_pad = reflection_pad_3d(vid, reflect_pad)
         vid_pad = nn_func.pad(vid_pad, const_pad,
                               mode='constant', value=-1.)
-        print("[og pad]: ",vid_pad.shape)
+        # print("[og pad]: ",vid_pad.shape)
         sim_layers = []
         for t in range(vid_pad.shape[-3] - 6):
             # -- exec nn --
@@ -47,7 +47,7 @@ def create_layers(seq_pad, min_i, nsearch, ps):
     smid = nsearch//2
     pad = 2*(ps//2) # 6 = 2 * 3 = 2 * (7//2)
     rm_pix = 2*(ps//2)
-    print("seq_pad.shape: ",seq_pad.shape)
+    # print("seq_pad.shape: ",seq_pad.shape)
 
     b, c, f, h, w = seq_pad.shape
     pdim = ps*ps*c
@@ -81,8 +81,7 @@ def create_layers(seq_pad, min_i, nsearch, ps):
                                    map_h_s:end_h:ps].flatten()
             # h - 80 - (h - 74 - map_v_s) % 7
             # print(map_v_s,end_v,h-(nsearch-1),h,nsearch)
-            # print(map_v_s,end_v)
-            # print(map_h_s,end_h)
+            # print(map_v_s,end_v,map_h_s,end_h,edge_v,edge_h)
             # print("min_i_tmp.shape: ",min_i_tmp.shape)
             layers_pad_tmp = unfold(seq_pad.transpose(1, 2).
                                     reshape(b * f, 3, h, w), (ps, ps))

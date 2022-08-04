@@ -15,7 +15,7 @@ import dnls
 from dnls.utils import get_nums_hw
 
 def run(vid,flows,k=10,ps=15,pt=1,ws=10,wt=0,dilation=1,stride0=1,stride1=1,
-        ps_f=7,use_k=True,reflect_bounds=True,reshape_output=True):
+        ps_f=7,use_k=True,reflect_bounds=True,use_prop_nn=True,reshape_output=True):
     """
     The proposed nn search.
 
@@ -24,14 +24,14 @@ def run(vid,flows,k=10,ps=15,pt=1,ws=10,wt=0,dilation=1,stride0=1,stride1=1,
     # -- include padding --
     in_vshape = vid.shape
     pad_r = ps_f + ps_f//2
-    print(pad_r)
+    # print(pad_r)
     pad_c = ws//2
-    print("[pre] vid.shape: ",vid.shape,ws,ps)
+    # print("[pre] vid.shape: ",vid.shape,ws,ps)
     pad = [pad_r,]*4
     vid = nn_func.pad(vid, pad, mode='reflect')
     pad = [pad_c,]*4
     vid = nn_func.pad(vid, pad, mode='constant',value=-1.)
-    print("[pad] vid.shape: ",vid.shape,ws,ps,pad_r,pad_c)
+    # print("[pad] vid.shape: ",vid.shape,ws,ps,pad_r,pad_c)
 
     # -- unpack --
     t,c,h,w = vid.shape
@@ -42,6 +42,7 @@ def run(vid,flows,k=10,ps=15,pt=1,ws=10,wt=0,dilation=1,stride0=1,stride1=1,
     h0_off,w0_off = 0,0
     h1_off,w1_off = 0,0
     use_adj,search_abs,exact = False,False,False
+    ws = ws if use_prop_nn else 10
     search = dnls.search.init("l2_with_index",
                               fflow, bflow, k, ps, pt,
                               ws, wt, dilation=dilation,
@@ -58,9 +59,8 @@ def run(vid,flows,k=10,ps=15,pt=1,ws=10,wt=0,dilation=1,stride0=1,stride1=1,
     ntotal = t * nh * nw
 
     # -- batchsize info --
-    MAX_NBATCH = 128*1024
-    # nbatch = ntotal
-    nbatch = 2*1024
+    MAX_NBATCH = 2*1024
+    nbatch = 2*1024#nh*nw
     nbatch = min(ntotal,MAX_NBATCH)
     nbatches = (ntotal - 1)//nbatch + 1
 
@@ -94,6 +94,7 @@ def run(vid,flows,k=10,ps=15,pt=1,ws=10,wt=0,dilation=1,stride0=1,stride1=1,
         h_e,w_e = c_s + h + 2*(ps_f//2),c_s + w + 2*(ps_f//2)
         dists = dists[:,c_s:h_e,c_s:w_e,:]
         inds = inds[:,c_s:h_e,c_s:w_e,:,:]
+    # print(inds[0,0,0,:3])
 
     return dists,inds
 
