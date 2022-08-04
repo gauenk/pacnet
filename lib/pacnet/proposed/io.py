@@ -31,11 +31,11 @@ def load_deno_model(cfg):
     read_noise =  optional(cfg,"read_noise",10.)
     shot_noise =  optional(cfg,"shot_noise",25.)
     qis_lambda =  optional(cfg,"qis_lambda",20.)
-    default_state_fn = get_default_state(cfg)
+    default_state_fn = get_default_deno_state(cfg)
 
     # -- params --
     device = optional(cfg,'device','cuda:0')
-    state_fn =  optional(cfg,"model_weights_fn",default_state_fn)
+    state_fn =  optional(cfg,"model_state_fn",default_state_fn)
 
     # -- declare --
     model = VidCnn()
@@ -48,9 +48,27 @@ def load_deno_model(cfg):
     return model
 
 def load_sr_model(cfg):
-    raise NotImplementedError("")
 
-def get_default_state(cfg):
+    # -- load defaults --
+    sr_type =  optional(cfg,"sr_type","default")
+    sr_scale =  optional(cfg,"sr_scale",4)
+    default_state_fn = get_default_sr_state(cfg)
+
+    # -- params --
+    device = optional(cfg,'device','cuda:0')
+    state_fn =  optional(cfg,"model_state_fn",default_state_fn)
+
+    # -- declare --
+    model = VidCnn()
+
+    # -- load state --
+    model_state = th.load(state_fn)
+    model.load_state_dict(model_state['state_dict'])
+    model.eval()
+
+    return model
+
+def get_default_deno_state(cfg):
 
     # -- unpack identifying info --
     ntype =  optional(cfg,"ntype","gaussian")
@@ -61,8 +79,7 @@ def get_default_state(cfg):
     fdir = Path(__file__).absolute().parents[0] / "../../../" # parent of "./lib"
 
     if ntype in ["gaussian","g"]:
-        data_sigma = optional(cfg,'sigma',50)
-        model_sigma = select_sigma(data_sigma)
+        model_sigma = select_sigma(sigma)
         state_fn = fdir/'./weights/s_cnn_video/model_state_sig{}.pt'.format(model_sigma)
     elif ntype in ["qis"]:
         raise NotImplementedError("No qis default yet.")
@@ -72,4 +89,18 @@ def get_default_state(cfg):
     assert os.path.isfile(state_fn)
     return state_fn
 
+def get_default_sr_state(cfg):
+
+    # -- unpack identifying info --
+    sr_type =  optional(cfg,"sr_type","default")
+    sr_scale =  optional(cfg,"sr_scale",4)
+    fdir = Path(__file__).absolute().parents[0] / "../../../" # parent of "./lib"
+
+    if sr_type == "default":
+        state_fn = fdir/f'./weights/sr/{sr_scale}/model_state.pt'
+    else:
+        raise ValueError(f"Uknown super-res. type [{sr_type}]")
+    print(state_fn)
+    assert os.path.isfile(state_fn)
+    return state_fn
 

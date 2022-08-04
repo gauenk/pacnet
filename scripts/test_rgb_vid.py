@@ -210,14 +210,14 @@ def main():
     cache_dir = ".cache_io"
     cache_name = "test_rgb_net" # current!
     cache = cache_io.ExpCache(cache_dir,cache_name)
-    # cache.clear()
+    cache.clear()
 
     # -- get defaults --
     cfg = configs.default_test_vid_cfg()
     cfg.isize = "128_128"
     # cfg.isize = "none"
     cfg.bw = False
-    cfg.nframes = 10
+    cfg.nframes = 3
     cfg.frame_start = 10
     cfg.frame_end = cfg.frame_start+cfg.nframes-1
 

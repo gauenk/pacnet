@@ -4,7 +4,6 @@ from . import aaai23
 # -- code api --
 from . import original
 from . import proposed
-from . import shared_model
 from . import configs
 from . import lightning
 from . import utils

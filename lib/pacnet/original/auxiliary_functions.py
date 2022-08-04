@@ -17,7 +17,6 @@ def reflection_pad_2d(in_seq, pad):
 def reflection_pad_vh_3d(in_seq, pad):
     mode = 'reflect' if pad[0] > 1 or pad[1] > 1 else 'replicate'
     pad = list(x for x in reversed(pad) for _ in range(2))  # fixing conv / pad inconsistency bug
-
     b, c, t, v, h = in_seq.shape
     in_seq = in_seq.transpose(1, 2).reshape(b * t, c, v, h)
     out_seq = nn_func.pad(in_seq, pad, mode).\
