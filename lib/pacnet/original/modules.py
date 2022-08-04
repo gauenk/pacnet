@@ -1,5 +1,6 @@
 import torch.nn as nn
 import torch
+import torch as th
 from torch.nn.functional import unfold
 from torch.nn.functional import fold
 import torch.nn.functional as nn_func
@@ -177,11 +178,9 @@ class VidCnn(nn.Module):
         const_pad = (37, 37, 37, 37, 3, 3)
         with torch.no_grad():
             denoised_vid_s = torch.zeros_like(noisy_vid,device=device)
-            print("noisy_vid.shape: ",noisy_vid.shape)
             noisy_vid_pad = reflection_pad_3d(noisy_vid, reflect_pad)
             noisy_vid_pad = nn_func.pad(noisy_vid_pad, const_pad,
                                         mode='constant', value=-1)
-            print("[padded] noisy_vid_pad.shape: ",noisy_vid_pad.shape)
             denoising_time_s_list = list()
             for t_s in range(noisy_vid_pad.shape[-3] - 6):
                 sliding_window = noisy_vid_pad[..., t_s:(t_s + 7), :, :].to(device)
@@ -241,42 +240,28 @@ class VidCnn(nn.Module):
         self_i = torch.arange(b * f * (h - 6) * (w - 6), dtype=torch.long,
                               device=seq_pad.device).view(b, 1, f, h - 6, w - 6)
         self_i = self_i[..., 3:-3, 37:-37, 37:-37].unsqueeze(-1)
-        print("i: ",self_i.shape,min_i.shape)
         min_i = torch.cat((self_i, min_i), dim=-1)
-        print("i: ",min_i.shape)
-        print("seq_pad.shape: ",seq_pad.shape)
 
         f_ind = 0
         min_i = min_i.permute(0, 2, 5, 1, 3, 4)
         min_i = min_i.reshape(b * (f - 6) * 15, h - 80, w - 80)
-        print("i: ",min_i.shape)
-        # exit(0)
 
         for map_v_s in range(7):
             for map_h_s in range(7):
                 min_i_tmp = min_i[..., map_v_s:(h - 80 - (h - 74 - map_v_s) % 7):7, \
                             map_h_s:(w - 80 - (w - 74 - map_h_s) % 7):7].flatten()
-                # print(min_i_tmp[:15])
 
                 layers_pad_tmp = unfold(seq_pad.transpose(1, 2).
                                         reshape(b * f, 3, h, w), (7, 7))
                 layers_pad_tmp = layers_pad_tmp.transpose(0, 1).reshape(147, -1)
                 mid = layers_pad_tmp.shape[1]//2
-                # b = layers_pad_tmp.shape[1]
-                # print(mid,layers_pad_tmp.shape[1])
-                # args = torch.where(layers_pad_tmp[0,:]!=-1)
-                # print(args)
-                # print(layers_pad_tmp[0,:][args][:3])
-                # print(layers_pad_tmp[:,136689].view(7,7,3).permute(2,0,1))
 
                 layers_pad_tmp = layers_pad_tmp[:, min_i_tmp]
-                # print("[b]: ",layers_pad_tmp[:,0].view(7,7,3).permute(2,0,1))
 
                 layers_pad_tmp = layers_pad_tmp.view(147, b * (f - 6) * 15,
                                                     ((h - 74 - map_v_s) // 7) * \
                                                      ((w - 74 - map_h_s) // 7))
                 layers_pad_tmp = layers_pad_tmp.transpose(0, 1)
-                # print("[c]: ",layers_pad_tmp[0,:,0].view(7,7,3).permute(2,1,0))
                 layers_pad_tmp = fold(
                     input=layers_pad_tmp,
                     output_size=(h - 74 - map_v_s - (h - 74 - map_v_s) % 7,
@@ -286,40 +271,14 @@ class VidCnn(nn.Module):
                     h - 74 - map_v_s - (h - 74 - map_v_s) % 7,
                     w - 74 - map_h_s - (w - 74 - map_h_s) % 7)
                 layers_pad_tmp = layers_pad_tmp.permute(0, 2, 3, 1, 4, 5)
-                # print("layers_pad_tmp.shape: ",layers_pad_tmp.shape)
-                # print(layers_pad_tmp[0,0,:,0,:5,:5])
-                # print(layers_pad_tmp[0,0,:,0,6-map_v_s,6-map_h_s])
-                # print(layers_pad_tmp[0,0,:,0,7-map_v_s,7-map_h_s])
-                # print(layers_pad_tmp[0,0,:,0,8-map_v_s,8-map_h_s])
-
                 tmp = in_layers[:, :, f_ind:f_ind + 3, :, \
                     map_v_s:(h - 74 - (h - 74 - map_v_s) % 7),
                     map_h_s:(w - 74 - (w - 74 - map_h_s) % 7)]
-                # print(tmp.shape)
-                # if f_ind == 144: continue
                 in_layers[:, :, f_ind:f_ind + 3, :, \
                     map_v_s:(h - 74 - (h - 74 - map_v_s) % 7),
                     map_h_s:(w - 74 - (w - 74 - map_h_s) % 7)] = layers_pad_tmp
-                # print("tmp.shape: ",tmp.shape)
-                # print("f_ind: ",f_ind)
                 f_ind = f_ind + 3
-        print("in_layers.shape: ",in_layers.shape)
         in_layers = in_layers[..., 6:-6, 6:-6]
-        # print("in_layers.shape: ",in_layers.shape)
-        # print(in_layers[0,0,:,0,0,0].view(7,7,3).permute(2,0,1))
-
-        # check = repeat(in_layers[:,:,:3,:,:,:],'a b c d e f -> a b (r c) d e f',r=49)
-        # print(check[0,0,:,0,0,0].view(7,7,3).permute(2,0,1))
-        # print(in_layers[0,0,:,0,0,0].view(7,7,3).permute(2,0,1))
-        # print(in_layers[0,1,:,0,0,0].view(7,7,3).permute(2,0,1))
-        # print(in_layers[0,0,:,0,3,3].view(7,7,3).permute(2,0,1))
-        # print("check.shape: ",check.shape)
-        # diff = torch.abs(check - in_layers)
-        # diff = torch.mean(diff,(0,2,3))
-        # print(torch.where(diff > 1e-3))
-        # print(diff.sum().item())
-        # print(in_layers[0,0,:,0,64,64].view(7,7,3).permute(2,0,1))
-        exit(0)
         return in_layers
 
     def forward(self, seq_in, gpu_usage=2):
@@ -328,17 +287,38 @@ class VidCnn(nn.Module):
         else:
             min_i = self.find_sorted_nn(seq_in)
 
-        print("seq_in.shape: ",seq_in.shape)
         seq_in = seq_in[..., 4:-4, 4:-4]
         in_layers = self.create_layers(seq_in, min_i)
         seq_valid_full = seq_in[..., 3 : -3, 43:-43, 43:-43]
+        print("-"*20 + " a " + "-"*20)
+        print("seq_in.shape: ",seq_in.shape)
+        print("in_layers.shape: ",in_layers.shape)
+        print("seq_valid_full.shape: ",seq_valid_full.shape)
+        print("-"*20 + " a " + "-"*20)
+
         seq_valid = seq_valid_full[..., 0, :, :]
         in_layers = in_layers.squeeze(-3)
         seq_valid_full = seq_valid_full.squeeze(-3)
+        print("-"*20)
+        print("in_layers.shape: ",in_layers.shape)
+        print("seq_valid_full.shape: ",seq_valid_full.shape)
+        print("-"*20)
+
+
         in_weights = (in_layers - in_layers[:, 0:1, ...]) ** 2
+        print("in_weights.shape: ",in_weights.shape)
         b, n, f, v, h = in_weights.shape
         in_weights = in_weights.view(b, n, f // 3, 3, v, h).mean(2)
+        print("in_weights.shape: ",in_weights.shape)
         in_layers = torch.cat((in_layers, in_weights), 2)
+        print(in_weights[0,0,:,0,0])
+        print(th.abs(seq_valid - seq_valid_full).sum().item())
+
+        print("-"*20 + " b " + "-"*20)
+        print("in_layers.shape: ",in_layers.shape)
+        print("seq_valid_full.shape: ",seq_valid_full.shape)
+        print("seq_valid.shape: ",seq_valid.shape)
+        print("-"*20 + " b " + "-"*20)
 
         seq_out = self.res_nn(in_layers, seq_valid_full, seq_valid)
 

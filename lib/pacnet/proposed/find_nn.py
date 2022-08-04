@@ -14,29 +14,33 @@ from pacnet.utils import optional
 import dnls
 from dnls.utils import get_nums_hw
 
-def run(vid,flows,k=10,ps=15,pt=1,ws=10,wt=0,dilation=1,stride0=1,stride1=1,
-        ps_f=7,use_k=True,reflect_bounds=True,use_prop_nn=True,reshape_output=True):
+def run(vid,flows,k=15,ps=15,pt=1,ws=10,wt=0,dilation=1,stride0=1,stride1=1,
+        ps_f=7,use_k=True,reflect_bounds=True,use_prop_nn=True,reshape_output=True,
+        add_padding=True):
     """
     The proposed nn search.
 
     """
 
     # -- include padding --
-    in_vshape = vid.shape
     pad_r = ps_f + ps_f//2
-    # print(pad_r)
     pad_c = ws//2
+    pad_f = pad_r + pad_c
     # print("[pre] vid.shape: ",vid.shape,ws,ps)
-    pad = [pad_r,]*4
-    vid = nn_func.pad(vid, pad, mode='reflect')
-    pad = [pad_c,]*4
-    vid = nn_func.pad(vid, pad, mode='constant',value=-1.)
+    if add_padding:
+        pad = [pad_r,]*4
+        vid = nn_func.pad(vid, pad, mode='reflect')
+        pad = [pad_c,]*4
+        vid = nn_func.pad(vid, pad, mode='constant',value=-1.)
     # print("[pad] vid.shape: ",vid.shape,ws,ps,pad_r,pad_c)
 
+    # -- compute shapes --
+    t,c,hp,wp = vid.shape
+    h,w = hp - 2*pad_f,wp - 2*pad_f
+
     # -- unpack --
-    t,c,h,w = vid.shape
-    fflow = None#optional(flows,'fflow',None)
-    bflow = None#optional(flows,'bflow',None)
+    print("h,w: ",h,w)
+    fflow,bflow = get_flows(flows,vid.shape)
 
     # -- init search --
     h0_off,w0_off = 0,0
@@ -88,7 +92,6 @@ def run(vid,flows,k=10,ps=15,pt=1,ws=10,wt=0,dilation=1,stride0=1,stride1=1,
     # print("inds.shape: ",inds.shape) # 128 + 6 = 134
     if reshape_output:
         dists,inds = reshape_nn_pair(dists,inds,vid.shape)
-        t,c,h,w = in_vshape
         c_s = pad_c + ps_f #pad_r#+pad_c
         c_s = (c_s-ps_f//2) if use_adj else c_s
         h_e,w_e = c_s + h + 2*(ps_f//2),c_s + w + 2*(ps_f//2)
@@ -104,3 +107,19 @@ def reshape_nn_pair(dists,inds,vshape):
     inds = rearrange(inds,'(t h w) k tr -> t h w k tr',h=h,w=w)
     return dists,inds
 
+
+def get_flows(flows,vshape):
+    fflow = optional(flows,'fflow',None)
+    bflow = optional(flows,'bflow',None)
+
+    if not fflow is None:
+        pad_h = (vshape[-2] - fflow.shape[-2])//2
+        pad_w = (vshape[-1] - fflow.shape[-1])//2
+        pads = [pad_h,pad_h,pad_w,pad_w]
+        fflow = nn_func.pad(fflow, pads, mode='constant',value=0)
+    if not bflow is None:
+        pad_h = (vshape[-2] - bflow.shape[-2])//2
+        pad_w = (vshape[-1] - bflow.shape[-1])//2
+        pads = [pad_h,pad_h,pad_w,pad_w]
+        bflow = nn_func.pad(bflow, pads, mode='constant',value=0)
+    return fflow,bflow

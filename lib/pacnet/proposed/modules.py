@@ -1,13 +1,17 @@
 import torch.nn as nn
 import torch
+import torch as th
 from torch.nn.functional import unfold
 from torch.nn.functional import fold
 import torch.nn.functional as nn_func
+from einops import rearrange
 
 import numpy as np
 import math
 
 from .auxiliary_functions import *
+from .find_nn import run as find_nn
+from .create_layers import run as create_layers
 
 
 class Logger(object):
@@ -165,25 +169,28 @@ class ResNn(nn.Module):
 
 
 class VidCnn(nn.Module):
-    def __init__(self):
+    def __init__(self,ws=25,wt=5,k=15,ps_f=7,ps_s=15):
         super(VidCnn, self).__init__()
-
+        self.ws = ws
+        self.wt = wt
+        self.k = k
+        self.ps_s = ps_s
+        self.ps_f = ps_f
         self.res_nn = ResNn()
 
-    def test_forward(self, noisy_vid, flows_are_none):
+    def test_forward(self, noisy_vid, flows):
         device = noisy_vid.device
-        reflect_pad = (0, 10, 10)
-        const_pad = (37, 37, 37, 37, 3, 3)
+        pad_r = self.ps_f//2 + self.ps_f
+        pad_c = self.ws//2
+        reflect_pad = (0, pad_r, pad_r)
+        const_pad = (pad_c, pad_c, pad_c, pad_c)#, 3, 3)
         with torch.no_grad():
-            denoised_vid_s = torch.zeros_like(noisy_vid,device=device)
-            noisy_vid_pad = reflection_pad_3d(noisy_vid, reflect_pad)
+            noisy_vid_pad = nn_func.pad(noisy_vid, [pad_r,]*4,
+                                        mode='reflect')
             noisy_vid_pad = nn_func.pad(noisy_vid_pad, const_pad,
                                         mode='constant', value=-1)
-            denoising_time_s_list = list()
-            for t_s in range(noisy_vid_pad.shape[-3] - 6):
-                sliding_window = noisy_vid_pad[..., t_s:(t_s + 7), :, :].to(device)
-                denoised_frame_s = self(sliding_window).clamp(min=0, max=1)
-                denoised_vid_s[..., t_s, :, :] = denoised_frame_s
+            print("noisy_vid_pad.shape: ",noisy_vid_pad.shape,pad_r,pad_c)
+            denoised_vid_s = self(noisy_vid_pad,flows).clamp(min=0, max=1)
         return denoised_vid_s
 
     def find_nn(self, seq_pad):
@@ -258,50 +265,83 @@ class VidCnn(nn.Module):
                 layers_pad_tmp = layers_pad_tmp.transpose(0, 1)
                 layers_pad_tmp = fold(
                     input=layers_pad_tmp,
-                    output_size=(h - 74 - map_v_s - (h - 74 - map_v_s) % 7, 
+                    output_size=(h - 74 - map_v_s - (h - 74 - map_v_s) % 7,
                                  w - 74 - map_h_s - (w - 74 - map_h_s) % 7),
                     kernel_size=(7, 7), stride=7)
                 layers_pad_tmp = layers_pad_tmp.view(b, f - 6, 15, 3, \
-                    h - 74 - map_v_s - (h - 74 - map_v_s) % 7, 
+                    h - 74 - map_v_s - (h - 74 - map_v_s) % 7,
                     w - 74 - map_h_s - (w - 74 - map_h_s) % 7)
                 layers_pad_tmp = layers_pad_tmp.permute(0, 2, 3, 1, 4, 5)
 
                 in_layers[:, :, f_ind:f_ind + 3, :, \
-                    map_v_s:(h - 74 - (h - 74 - map_v_s) % 7), 
+                    map_v_s:(h - 74 - (h - 74 - map_v_s) % 7),
                     map_h_s:(w - 74 - (w - 74 - map_h_s) % 7)] = layers_pad_tmp
                 f_ind = f_ind + 3
         in_layers = in_layers[..., 6:-6, 6:-6]
 
         return in_layers
 
-    def forward(self, seq_in, gpu_usage=2):
-        if gpu_usage == 1 and torch.cuda.is_available():
-            min_i = self.find_sorted_nn(seq_in.cuda()).cpu()
-        else:
-            min_i = self.find_sorted_nn(seq_in)
+    def forward(self, seq_in, flows=None):
 
-        seq_in = seq_in[..., 4:-4, 4:-4]
-        in_layers = self.create_layers(seq_in, min_i)
-        seq_valid_full = seq_in[..., 3 : -3, 43:-43, 43:-43]
-        seq_valid = seq_valid_full[..., 0, :, :]
-        in_layers = in_layers.squeeze(-3)
+        # -- create similar layers --
+        inds = self.find_sorted_nn(seq_in,flows)
+        seq_in = seq_in[..., 4:-4, 4:-4].contiguous()
+        in_layers = create_layers(seq_in, inds, self.ws, self.ps_s, self.ps_f,
+                                  add_padding=False)
+        # [original] b, k, chnl, h, w
+        # [ours] k t chnl, h, w
+
+        # -- center padded input --
+        cc = self.ws//2 + (self.ps_f-1)
+        seq_valid_full = seq_in[:,:,..., cc:-cc, cc:-cc].transpose(0,1)
+        print("-"*20 + " a " + "-"*20)
+        print("seq_in.shape: ",seq_in.shape)
+        print("in_layers.shape: ",in_layers.shape)
+        print("seq_valid_full.shape: ",seq_valid_full.shape)
+        print("-"*20 + " a " + "-"*20)
+
+        seq_valid = seq_valid_full[..., :, :, :]
         seq_valid_full = seq_valid_full.squeeze(-3)
-        in_weights = (in_layers - in_layers[:, 0:1, ...]) ** 2
-        b, n, f, v, h = in_weights.shape
-        in_weights = in_weights.view(b, n, f // 3, 3, v, h).mean(2)
+        in_layers = in_layers.squeeze(-3)
+        print(th.abs(seq_valid - seq_valid_full).sum().item())
+
+        print("-"*20)
+        print("in_layers.shape: ",in_layers.shape)
+        print("-"*20)
+
+        in_weights = (in_layers - in_layers[0:1, ...]) ** 2
+        n, b, f, h, w = in_weights.shape
+        print("in_weights.shape: ",in_weights.shape)
+        in_weights = in_weights.view(n, b, f // 3, 3, h, w).mean(2)
+        print("in_weights.shape: ",in_weights.shape)
         in_layers = torch.cat((in_layers, in_weights), 2)
+        # print(in_weights[0,0,:,0,0])
 
-        seq_out = self.res_nn(in_layers, seq_valid_full, seq_valid)
+        print("-"*20 + " b " + "-"*20)
+        print("in_layers.shape: ",in_layers.shape)
+        print("seq_valid_full.shape: ",seq_valid_full.shape)
+        print("seq_valid.shape: ",seq_valid.shape)
+        print("-"*20 + " b " + "-"*20)
 
-        return seq_out
+        # -- reshape for net --
+        in_layers = rearrange(in_layers,'k t c h w -> t k c h w')
+        seq_valid_full = rearrange(seq_valid_full,'c t h w -> t c h w')
+        seq_valid = rearrange(seq_valid,'c t h w -> t c h w')
 
-    def find_sorted_nn(self, seq_in):
-        seq_pad_nn = seq_in
-        min_d, min_i = self.find_nn(seq_pad_nn)
-        min_d, sort_i = torch.sort(min_d, -1)
-        min_i = min_i.gather(-1, sort_i)
+        print("-"*20 + " c " + "-"*20)
+        print("in_layers.shape: ",in_layers.shape)
+        print("seq_valid_full.shape: ",seq_valid_full.shape)
+        print("seq_valid.shape: ",seq_valid.shape)
+        print("-"*20 + " c " + "-"*20)
 
-        return min_i
+        deno = self.res_nn(in_layers, seq_valid_full, seq_valid)
+        return deno
+
+    def find_sorted_nn(self, seq_in, flows=None):
+        dists, inds = find_nn(seq_in,flows,ps=self.ps_s,k=self.k,
+                              ws=self.ws,wt=self.wt,ps_f=self.ps_f,
+                              reshape_output=True,add_padding=False)
+        return inds
 
 
 class ImCnn(nn.Module):

@@ -6,17 +6,22 @@ from .auxiliary_functions import reflection_pad_3d
 from torch.nn.functional import unfold,fold
 import dnls
 
-def run(vid, inds, nsearch=15, ps_s=15, ps_f=7, testing=False):
+def run(vid, inds, nsearch=15, ps_s=15, ps_f=7, add_padding=True, testing=False):
 
     # -- reflect --
-    t,c,h,w = vid.shape
     pad_r = ps_f//2 + ps_f
     pad_c = (nsearch-1)//2
-    vid = nn_func.pad(vid, [pad_r,]*4, mode='reflect')
-    vid = nn_func.pad(vid, [pad_c,]*4, mode='constant',value=-1)
-    vid = vid[...,4:-4,4:-4].contiguous()
+    pad_f = pad_r + pad_c
+    print(pad_r,pad_c)
+    if add_padding:
+        vid = nn_func.pad(vid, [pad_r,]*4, mode='reflect')
+        vid = nn_func.pad(vid, [pad_c,]*4, mode='constant',value=-1)
+        vid = vid[...,4:-4,4:-4].contiguous()
     t,c,hp0,wp0 = vid.shape
-    # print("[new pad] vid.shape: ",vid.shape)
+    h,w = hp0-2*(pad_f-4),wp0-2*(pad_f-4)
+    print("[new pad] vid.shape: ",vid.shape)
+    print("h,w: ",h,w,hp0,wp0)
+    print("inds.shape: ",inds.shape)
 
     # -- shift inds --
     inds[...,1] = inds[...,1] - 4
@@ -40,6 +45,7 @@ def run(vid, inds, nsearch=15, ps_s=15, ps_f=7, testing=False):
 
     # -- decl dim info --
     nh,nw = (h-1)//ps_f + 1,(w-1)//ps_f + 1
+    print("nh,nw: ",nh,nw)
     k = patches.shape[3]
     ps = ps_f
     pdim = ps*ps*c
@@ -89,8 +95,9 @@ def run(vid, inds, nsearch=15, ps_s=15, ps_f=7, testing=False):
             c0 += 3
 
     # -- extract center --
-    ps2 = 2*(ps_f//2)
+    ps2 = (ps_f-1)
     sim_vids = sim_vids[...,ps2:-ps2,ps2:-ps2]
+    print("Any nan? ",th.any(th.isnan(sim_vids)).item())
 
     # -- final reshape [testing only] --
     if testing:

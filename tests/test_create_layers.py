@@ -155,16 +155,8 @@ def test_original_proposed(isize,nframes,nsearch,use_prop_nn):
     hw = h*w
 
     # -- original --
-    fn = Path("create_layers.pt")
-    recomp = True
-    if not fn.exists() or recomp:
-        if fn.exists(): os.remove(str(fn))
-        dists_gt,inds_gt = pacnet.original.find_nn.run(vid,nsearch,ps_s,ps_f)
-        sim_gt = pacnet.original.create_layers.run(clean,inds_gt,nsearch,ps_s,ps_f)
-        th.save([dists_gt,inds_gt,sim_gt],str(fn))
-    else:
-        triplet = th.load(str(fn))
-        dists_gt,inds_gt,sim_gt = triplet[0],triplet[1],triplet[2]
+    dists_gt,inds_gt = pacnet.original.find_nn.run(vid,nsearch,ps_s,ps_f)
+    sim_gt = pacnet.original.create_layers.run(clean,inds_gt,nsearch,ps_s,ps_f)
     sim_gt = sim_gt[...,0,:,:]
 
     # -- proposed --

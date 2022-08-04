@@ -217,7 +217,7 @@ def main():
     cfg.isize = "128_128"
     # cfg.isize = "none"
     cfg.bw = False
-    cfg.nframes = 3
+    cfg.nframes = 5
     cfg.frame_start = 10
     cfg.frame_end = cfg.frame_start+cfg.nframes-1
 
@@ -230,7 +230,7 @@ def main():
     # vid_names = ["sunflower","hypersmooth","tractor"]
     # vid_names = ["snowboard","sunflower","tractor","motorbike",
     #              "hypersmooth","park_joy","rafting","touchdown"]
-    flow,isizes,adapt_mtypes = ["false"],["none"],["rand"]
+    flow,isizes,adapt_mtypes = ["true"],["none"],["rand"]
     model_names = ["proposed"]
     exp_lists = {"dname":dnames,"vid_name":vid_names,"sigma":sigmas,
                  "internal_adapt_nsteps":internal_adapt_nsteps,
@@ -251,8 +251,8 @@ def main():
     cache_io.append_configs(exps_b,cfg) # merge the two
 
     # -- cat exps --
-    # exps = exps_a + exps_b
-    exps = exps_b
+    exps = exps_a + exps_b
+    # exps = exps_b
 
     # -- run exps --
     nexps = len(exps)
