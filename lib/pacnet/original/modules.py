@@ -4,13 +4,12 @@ import torch as th
 from torch.nn.functional import unfold
 from torch.nn.functional import fold
 import torch.nn.functional as nn_func
-from einops import repeat
+from einops import repeat,rearrange
 
 import numpy as np
 import math
 
 from .auxiliary_functions import *
-
 
 class Logger(object):
     def __init__(self, fname="logfile.log"):
@@ -166,13 +165,72 @@ class ResNn(nn.Module):
         return x_valid - x_f
 
 
+class PaCNet(nn.Module):
+
+    def __init__(self):
+        super(PaCNet, self).__init__()
+        self.vid_cnn = VidCnn()
+        self.tf_net = TfNet()
+
+    def test_forward(self,vid,flows_is_none=None):
+        deno = self.vid_cnn.test_forward(vid)
+        deno = self.tf_net.test_forward(vid,deno)
+        return deno
+
 class VidCnn(nn.Module):
     def __init__(self):
         super(VidCnn, self).__init__()
 
         self.res_nn = ResNn()
 
-    def test_forward(self, noisy_vid, flows_are_none):
+    def pad_vid(self,vid):
+        # -- fixed params --
+        ws = 75
+        ps_f = 7
+
+        # -- shape to expected for original --
+        pad_r = ps_f//2 + ps_f
+        pad_c = ws//2
+
+        # -- padding --
+        vid_pad = nn_func.pad(vid, [pad_r,]*4,
+                              mode='reflect')
+        vid_pad = nn_func.pad(vid_pad, [pad_c,]*4,
+                              mode='constant', value=-1)
+        return vid_pad
+
+    def compute_sims(self, noisy_vid, clean_vid, flows_is_none):
+        # -- unpack --
+        nframes,c,h,w = noisy_vid.shape
+        device = noisy_vid.device
+
+        with torch.no_grad():
+            # -- add padding --
+            noisy_pad = self.pad_vid(noisy_vid)
+            clean_pad = self.pad_vid(clean_vid)
+
+            # -- rearrange for sort and create --
+            noisy_pad = rearrange(noisy_pad,'t c h w -> 1 c t h w')
+            clean_pad = rearrange(clean_pad,'t c h w -> 1 c t h w')
+            noisy_pad = nn_func.pad(noisy_pad, (0,0,0,0,3,3),
+                                    mode='constant', value=-1)
+            clean_pad = nn_func.pad(clean_pad, (0,0,0,0,3,3),
+                                    mode='constant', value=-1)
+            print("noisy_pad.shape: ",noisy_pad.shape)
+            print("clean_pad.shape: ",clean_pad.shape)
+
+            # -- temporal crop for pacnet processing --
+            inds = self.find_sorted_nn(noisy_pad)
+
+            # -- non-local search --
+            clean_pad = clean_pad[..., 4:-4, 4:-4].contiguous()
+
+            # -- sim video --
+            sim_vids = self.create_layers(clean_pad, inds)
+        sim_vids = rearrange(sim_vids,'1 k c t h w -> k t c h w')
+        return sim_vids
+
+    def test_forward(self, noisy_vid, flows_are_none=None):
         device = noisy_vid.device
         reflect_pad = (0, 10, 10)
         const_pad = (37, 37, 37, 37, 3, 3)
@@ -198,7 +256,8 @@ class VidCnn(nn.Module):
         i_arange_patch_pad = torch.arange(b * f * (h - 14) * (w - 14), dtype=torch.long,
                                           device=seq_pad.device).view(b, 1, f, (h - 14), (w - 14))
         i_arange_patch_pad = i_arange_patch_pad[..., 3:-3, 37:-37, 37:-37]
-        i_arange_patch = torch.arange(np.array(min_d.shape[0:-1]).prod(), dtype=torch.long,
+        i_arange_patch = torch.arange(np.array(min_d.shape[0:-1]).prod(),
+                                      dtype=torch.long,
                                       device=seq_pad.device).view(min_d.shape[0:-1])
 
         for t_s in range(7):
@@ -282,6 +341,7 @@ class VidCnn(nn.Module):
         return in_layers
 
     def forward(self, seq_in, gpu_usage=2):
+        # print("seq_in.shape: ",seq_in.shape)
         if gpu_usage == 1 and torch.cuda.is_available():
             min_i = self.find_sorted_nn(seq_in.cuda()).cpu()
         else:
@@ -290,35 +350,35 @@ class VidCnn(nn.Module):
         seq_in = seq_in[..., 4:-4, 4:-4]
         in_layers = self.create_layers(seq_in, min_i)
         seq_valid_full = seq_in[..., 3 : -3, 43:-43, 43:-43]
-        print("-"*20 + " a " + "-"*20)
-        print("seq_in.shape: ",seq_in.shape)
-        print("in_layers.shape: ",in_layers.shape)
-        print("seq_valid_full.shape: ",seq_valid_full.shape)
-        print("-"*20 + " a " + "-"*20)
+        # print("-"*20 + " a " + "-"*20)
+        # print("seq_in.shape: ",seq_in.shape)
+        # print("in_layers.shape: ",in_layers.shape)
+        # print("seq_valid_full.shape: ",seq_valid_full.shape)
+        # print("-"*20 + " a " + "-"*20)
 
         seq_valid = seq_valid_full[..., 0, :, :]
         in_layers = in_layers.squeeze(-3)
         seq_valid_full = seq_valid_full.squeeze(-3)
-        print("-"*20)
-        print("in_layers.shape: ",in_layers.shape)
-        print("seq_valid_full.shape: ",seq_valid_full.shape)
-        print("-"*20)
+        # print("-"*20)
+        # print("in_layers.shape: ",in_layers.shape)
+        # print("seq_valid_full.shape: ",seq_valid_full.shape)
+        # print("-"*20)
 
 
         in_weights = (in_layers - in_layers[:, 0:1, ...]) ** 2
-        print("in_weights.shape: ",in_weights.shape)
+        # print("in_weights.shape: ",in_weights.shape)
         b, n, f, v, h = in_weights.shape
         in_weights = in_weights.view(b, n, f // 3, 3, v, h).mean(2)
-        print("in_weights.shape: ",in_weights.shape)
+        # print("in_weights.shape: ",in_weights.shape)
         in_layers = torch.cat((in_layers, in_weights), 2)
-        print(in_weights[0,0,:,0,0])
-        print(th.abs(seq_valid - seq_valid_full).sum().item())
+        # print(in_weights[0,0,:,0,0])
+        # print(th.abs(seq_valid - seq_valid_full).sum().item())
 
-        print("-"*20 + " b " + "-"*20)
-        print("in_layers.shape: ",in_layers.shape)
-        print("seq_valid_full.shape: ",seq_valid_full.shape)
-        print("seq_valid.shape: ",seq_valid.shape)
-        print("-"*20 + " b " + "-"*20)
+        # print("-"*20 + " b " + "-"*20)
+        # print("in_layers.shape: ",in_layers.shape)
+        # print("seq_valid_full.shape: ",seq_valid_full.shape)
+        # print("seq_valid.shape: ",seq_valid.shape)
+        # print("-"*20 + " b " + "-"*20)
 
         seq_out = self.res_nn(in_layers, seq_valid_full, seq_valid)
 
@@ -553,9 +613,11 @@ class Conv2DNet(nn.Module):
         super(Conv2DNet, self).__init__()
 
         for i in range(16):
-            self.add_module('conv_2d_block{}'.format(i), ConvBnRe2D(in_ch=96, out_ch=96))
-        
-        self.add_module('conv_2d_block{}'.format(16), Conv2DL(in_ch=96, out_ch=3))
+            self.add_module('conv_2d_block{}'.format(i),
+                            ConvBnRe2D(in_ch=96, out_ch=96))
+
+        self.add_module('conv_2d_block{}'.format(16),
+                        Conv2DL(in_ch=96, out_ch=3))
 
     def forward(self, x):
         for name, layer in self.named_children():
@@ -581,9 +643,20 @@ class TfNet3D(nn.Module):
 class TfNet(nn.Module):
     def __init__(self):
         super(TfNet, self).__init__()
-        
         self.conv_net = TfNet3D()
-    
+
+    def test_forward(self, noisy, deno0):
+        device = noisy.device
+        deno_vid = th.zeros_like(deno0)
+        cat_vid = torch.cat((noisy, deno0), dim=1)
+        cat_vid = reflection_pad_t_3d(cat_vid.cpu(), 3).to(device)
+        with th.no_grad():
+            for t_s in range(cat_vid.shape[2] - 6):
+                sliding_window = cat_vid[:, :, t_s:(t_s + 7), ...].to(device)
+                deno_t = self(sliding_window).clamp(min=0, max=1)
+                deno_vid[..., t_s, :, :] = deno_t
+        return deno_vid
+
     def forward(self, x):
         xn = x[:, 3:6, 3, :, :].clone()
         x = self.conv_net(x)

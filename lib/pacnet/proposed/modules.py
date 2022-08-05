@@ -11,6 +11,7 @@ import math
 
 from .auxiliary_functions import *
 from .find_nn import run as find_nn
+from .find_nn_multigpu import run as find_nn_multigpu
 from .create_layers import run as create_layers
 
 
@@ -168,180 +169,166 @@ class ResNn(nn.Module):
         return x_valid - x_f
 
 
+class PaCNet(nn.Module):
+
+    def __init__(self,ws=25,wt=5,k=15,ps_f=7,ps_s=15,ngpus=1,
+                 nn_bs_list=None,time_chunk=-1):
+        super(PaCNet, self).__init__()
+        self.vid_cnn = VidCnn(ws,wt,k,ps_f,ps_s,ngpus,nn_bs_list,time_chunk)
+        self.tf_net = TfNet()
+
+    def forward(self,vid,flows,clean=None):
+        pass
+
+    def test_forward(self,vid,flows,clean=None):
+        device = vid.device
+        deno = self.vid_cnn.test_forward(vid,flows,clean)
+        th.cuda.empty_cache()
+        deno = self.tf_net.test_forward(vid,deno,device)
+        return deno
+
 class VidCnn(nn.Module):
-    def __init__(self,ws=25,wt=5,k=15,ps_f=7,ps_s=15):
+    def __init__(self,ws=25,wt=5,k=15,ps_f=7,ps_s=15,ngpus=1,
+                 nn_bs_list=None,time_chunk=-1):
         super(VidCnn, self).__init__()
         self.ws = ws
         self.wt = wt
         self.k = k
         self.ps_s = ps_s
         self.ps_f = ps_f
+        self.ngpus = ngpus
+        self.nn_bs_list = nn_bs_list
+        self.time_chunk = time_chunk
         self.res_nn = ResNn()
 
+    def pad_vid(self,vid):
+        pad_r = self.ps_f//2 + self.ps_f
+        pad_c = self.ws//2
+
+        vid_pad = nn_func.pad(vid, [pad_r,]*4,
+                              mode='reflect')
+        vid_pad = nn_func.pad(vid_pad, [pad_c,]*4,
+                              mode='constant', value=-1)
+        return vid_pad
+
+    def compute_sims(self, noisy_vid, clean_vid, flows):
+        # -- unpack --
+        nframes,c,h,w = noisy_vid.shape
+        device = noisy_vid.device
+
+        # -- shape to expected for original --
+        with torch.no_grad():
+            # -- add padding --
+            noisy_pad = self.pad_vid(noisy_vid)
+            clean_pad = self.pad_vid(clean_vid)
+
+            # -- temporal crop for pacnet processing --
+            inds = self.find_sorted_nn(noisy_pad,flows).to(device)
+
+            # -- non-local search --
+            clean_pad = clean_pad[..., 4:-4, 4:-4].contiguous()
+
+            # -- sim video --
+            sim_vids = create_layers(clean_pad, inds, self.ws,
+                                     self.ps_s, self.ps_f, add_padding=False)
+        return sim_vids
+
     def test_forward(self, noisy_vid, flows):
+        nframes,c,h,w = noisy_vid.shape
         device = noisy_vid.device
         pad_r = self.ps_f//2 + self.ps_f
         pad_c = self.ws//2
         reflect_pad = (0, pad_r, pad_r)
         const_pad = (pad_c, pad_c, pad_c, pad_c)#, 3, 3)
+        time_chunk = nframes if self.time_chunk > 0 else self.time_chunk
+        time_chunk = min(nframes,time_chunk)
+        noisy_vid = noisy_vid.cpu()
         with torch.no_grad():
+
+            # -- shell to fill --
+            deno = th.zeros_like(noisy_vid)
+
+            # -- add padding --
             noisy_vid_pad = nn_func.pad(noisy_vid, [pad_r,]*4,
                                         mode='reflect')
             noisy_vid_pad = nn_func.pad(noisy_vid_pad, const_pad,
                                         mode='constant', value=-1)
-            print("noisy_vid_pad.shape: ",noisy_vid_pad.shape,pad_r,pad_c)
-            denoised_vid_s = self(noisy_vid_pad,flows).clamp(min=0, max=1)
-        return denoised_vid_s
+            noisy_vid_pad = noisy_vid_pad#.to(device)
 
-    def find_nn(self, seq_pad):
-        seq_n = seq_pad[:, :, 3:-3, 37:-37, 37:-37]
-        b, c, f, h, w = seq_pad.shape
-        min_d = torch.full((b, 1, f - 6, h - 88, w - 88, 14), float('inf'),
-                           dtype=seq_pad.dtype, device=seq_pad.device)
-        min_i = torch.full(min_d.shape, -(seq_n.numel() + 1),
-                           dtype=torch.long, device=seq_pad.device)
-        i_arange_patch_pad = torch.arange(b * f * (h - 14) * (w - 14), dtype=torch.long,
-                                          device=seq_pad.device).view(b, 1, f, (h - 14), (w - 14))
-        i_arange_patch_pad = i_arange_patch_pad[..., 3:-3, 37:-37, 37:-37]
-        i_arange_patch = torch.arange(np.array(min_d.shape[0:-1]).prod(), dtype=torch.long,
-                                      device=seq_pad.device).view(min_d.shape[0:-1])
+            # -- process each frame --
+            for ti in range(nframes):
+                # -- cleanup --
+                # print(th.cuda.current_device())
+                th.cuda.empty_cache()
 
-        for t_s in range(7):
-            t_e = t_s - 6 if t_s != 6 else None
-            for v_s in range(75):
-                v_e = v_s - 74 if v_s != 74 else None
-                for h_s in range(75):
-                    if h_s == 37 and v_s == 37 and t_s == 3:
-                        continue
-                    h_e = h_s - 74 if h_s != 74 else None
+                # -- temporal crop for pacnet processing --
+                t_start = max(ti - self.time_chunk//2,0)
+                t_end = min(t_start + self.time_chunk,nframes)
+                t_start = max(t_end - self.time_chunk,0)
+                tj = np.argmin(np.abs(np.arange(t_start,t_end) - ti))
+                # print(ti,tj,t_start,t_end)
+                noisy_search = noisy_vid_pad[t_start:t_end].to(device)
 
-                    seq_d = ((seq_pad[..., t_s:t_e, v_s:v_e, h_s:h_e] - seq_n) ** 2).mean(dim=1, keepdim=True)
-                    seq_d = torch.cumsum(seq_d, dim=-1)
-                    tmp = seq_d[..., 0:-15]
-                    seq_d = seq_d[..., 14:]
-                    seq_d[..., 1:] = seq_d[..., 1:] - tmp
+                # -- non-local search --
+                flows_i = self.tslice_flows(flows,t_start,t_end)
+                inds = self.find_sorted_nn(noisy_search,flows_i,tj,tj+1)
+                noisy_search = noisy_search[..., 4:-4, 4:-4].contiguous()
+                inds_tj = inds.to(device)
 
-                    seq_d = torch.cumsum(seq_d, dim=-2)
-                    tmp = seq_d[..., 0:-15, :]
-                    seq_d = seq_d[..., 14:, :]
-                    seq_d[..., 1:, :] = seq_d[..., 1:, :] - tmp
+                # -- creating sim layer --
+                # inds_tj = inds[[tj]].to(device)
+                # print("inds.shape: ",inds.shape)
+                sim_vid = create_layers(noisy_search, inds_tj, self.ws,
+                                        self.ps_s, self.ps_f, add_padding=False)
+                sim_vid = rearrange(sim_vid,'k t c h w -> t k c h w')
 
-                    neigh_d_max, neigh_i_rel = min_d.max(-1)
-                    neigh_i_abs = neigh_i_rel + i_arange_patch * 14
-                    tmp_i = i_arange_patch_pad + ((t_s - 3) * (h - 14) * (w - 14) + (v_s - 37) * (w - 14) + h_s - 37)
+                # -- get middle img --
+                cc = self.ws//2 + (self.ps_f-1)
+                noisy_chunk = noisy_search[...,cc:-cc,cc:-cc]
+                noisy_ti = noisy_search[[tj],...,cc:-cc,cc:-cc]
 
-                    i_change = seq_d < neigh_d_max
-                    min_d.flatten()[neigh_i_abs[i_change]] = seq_d.flatten()[i_arange_patch[i_change]]
-                    min_i.flatten()[neigh_i_abs[i_change]] = tmp_i[i_change]
+                # -- exec vid cnn --
+                # print(noisy_ti.shape,noisy_chunk.shape,sim_vid.shape)
+                # print(noisy_ti.device,noisy_chunk.device,sim_vid.device)
+                deno_ti = self(noisy_ti,noisy_chunk,sim_vid)
+                deno[ti,...] = deno_ti[...].clamp(min=0, max=1).cpu()
+                del sim_vid,inds
 
-        return min_d, min_i
+        th.cuda.synchronize()
+        # print("done.")
+        return deno.to(device)
 
-    def create_layers(self, seq_pad, min_i):
+    def tslice_flows(self,flows,ts,te):
+        if flows is None: return None
+        flows_s = {}
+        for aflow in flows:
+            flows_s[aflow] = flows[aflow][ts:te]
+        return flows_s
 
-        b, c, f, h, w = seq_pad.shape
-        in_layers = torch.full((b, 15, 147, f - 6, h - 74, w - 74),
-                               float('nan'), dtype=seq_pad.dtype, device=seq_pad.device)
-
-        self_i = torch.arange(b * f * (h - 6) * (w - 6), dtype=torch.long,
-                              device=seq_pad.device).view(b, 1, f, h - 6, w - 6)
-        self_i = self_i[..., 3:-3, 37:-37, 37:-37].unsqueeze(-1)
-        min_i = torch.cat((self_i, min_i), dim=-1)
-
-        f_ind = 0
-        min_i = min_i.permute(0, 2, 5, 1, 3, 4)
-        min_i = min_i.reshape(b * (f - 6) * 15, h - 80, w - 80)
-
-        for map_v_s in range(7):
-            for map_h_s in range(7):
-                min_i_tmp = min_i[..., map_v_s:(h - 80 - (h - 74 - map_v_s) % 7):7, \
-                                       map_h_s:(w - 80 - (w - 74 - map_h_s) % 7):7].flatten()
-
-                layers_pad_tmp = unfold(seq_pad.transpose(1, 2).
-                                        reshape(b * f, 3, h, w), (7, 7))
-                layers_pad_tmp = layers_pad_tmp.transpose(0, 1).reshape(147, -1)
-                layers_pad_tmp = layers_pad_tmp[:, min_i_tmp]
-                layers_pad_tmp = layers_pad_tmp.view(147, b * (f - 6) * 15,
-                                                    ((h - 74 - map_v_s) // 7) * ((w - 74 - map_h_s) // 7))
-                layers_pad_tmp = layers_pad_tmp.transpose(0, 1)
-                layers_pad_tmp = fold(
-                    input=layers_pad_tmp,
-                    output_size=(h - 74 - map_v_s - (h - 74 - map_v_s) % 7,
-                                 w - 74 - map_h_s - (w - 74 - map_h_s) % 7),
-                    kernel_size=(7, 7), stride=7)
-                layers_pad_tmp = layers_pad_tmp.view(b, f - 6, 15, 3, \
-                    h - 74 - map_v_s - (h - 74 - map_v_s) % 7,
-                    w - 74 - map_h_s - (w - 74 - map_h_s) % 7)
-                layers_pad_tmp = layers_pad_tmp.permute(0, 2, 3, 1, 4, 5)
-
-                in_layers[:, :, f_ind:f_ind + 3, :, \
-                    map_v_s:(h - 74 - (h - 74 - map_v_s) % 7),
-                    map_h_s:(w - 74 - (w - 74 - map_h_s) % 7)] = layers_pad_tmp
-                f_ind = f_ind + 3
-        in_layers = in_layers[..., 6:-6, 6:-6]
-
-        return in_layers
-
-    def forward(self, seq_in, flows=None):
-
-        # -- create similar layers --
-        inds = self.find_sorted_nn(seq_in,flows)
-        seq_in = seq_in[..., 4:-4, 4:-4].contiguous()
-        in_layers = create_layers(seq_in, inds, self.ws, self.ps_s, self.ps_f,
-                                  add_padding=False)
-        # [original] b, k, chnl, h, w
-        # [ours] k t chnl, h, w
-
-        # -- center padded input --
-        cc = self.ws//2 + (self.ps_f-1)
-        seq_valid_full = seq_in[:,:,..., cc:-cc, cc:-cc].transpose(0,1)
-        print("-"*20 + " a " + "-"*20)
-        print("seq_in.shape: ",seq_in.shape)
-        print("in_layers.shape: ",in_layers.shape)
-        print("seq_valid_full.shape: ",seq_valid_full.shape)
-        print("-"*20 + " a " + "-"*20)
-
-        seq_valid = seq_valid_full[..., :, :, :]
-        seq_valid_full = seq_valid_full.squeeze(-3)
-        in_layers = in_layers.squeeze(-3)
-        print(th.abs(seq_valid - seq_valid_full).sum().item())
-
-        print("-"*20)
-        print("in_layers.shape: ",in_layers.shape)
-        print("-"*20)
-
-        in_weights = (in_layers - in_layers[0:1, ...]) ** 2
-        n, b, f, h, w = in_weights.shape
-        print("in_weights.shape: ",in_weights.shape)
-        in_weights = in_weights.view(n, b, f // 3, 3, h, w).mean(2)
-        print("in_weights.shape: ",in_weights.shape)
+    def forward(self, seq_valid, seq_valid_full, in_layers):
+        # -- patch weights --
+        in_weights = (in_layers - in_layers[:,0:1, ...]) ** 2
+        b, n, f, h, w = in_weights.shape
+        in_weights = in_weights.view(b, n, f // 3, 3, h, w).mean(2)
         in_layers = torch.cat((in_layers, in_weights), 2)
-        # print(in_weights[0,0,:,0,0])
-
-        print("-"*20 + " b " + "-"*20)
-        print("in_layers.shape: ",in_layers.shape)
-        print("seq_valid_full.shape: ",seq_valid_full.shape)
-        print("seq_valid.shape: ",seq_valid.shape)
-        print("-"*20 + " b " + "-"*20)
-
-        # -- reshape for net --
-        in_layers = rearrange(in_layers,'k t c h w -> t k c h w')
-        seq_valid_full = rearrange(seq_valid_full,'c t h w -> t c h w')
-        seq_valid = rearrange(seq_valid,'c t h w -> t c h w')
-
-        print("-"*20 + " c " + "-"*20)
-        print("in_layers.shape: ",in_layers.shape)
-        print("seq_valid_full.shape: ",seq_valid_full.shape)
-        print("seq_valid.shape: ",seq_valid.shape)
-        print("-"*20 + " c " + "-"*20)
-
+        # print("in_layers.shape: ",in_layers.shape)
         deno = self.res_nn(in_layers, seq_valid_full, seq_valid)
         return deno
 
-    def find_sorted_nn(self, seq_in, flows=None):
-        dists, inds = find_nn(seq_in,flows,ps=self.ps_s,k=self.k,
-                              ws=self.ws,wt=self.wt,ps_f=self.ps_f,
-                              reshape_output=True,add_padding=False)
-        return inds
+    def find_sorted_nn(self, seq_in, flows=None, tstart=None, tend=None):
+        if self.ngpus > 1:
+            dists, inds = find_nn_multigpu(seq_in,flows,ps=self.ps_s,k=self.k,
+                                           ws=self.ws,wt=self.wt,ps_f=self.ps_f,
+                                           reshape_output=True,add_padding=False,
+                                           bs_list=self.nn_bs_list,
+                                           tstart=tstart,tend=tend)
+        else:
+            dists, inds = find_nn(seq_in,flows,ps=self.ps_s,k=self.k,
+                                  ws=self.ws,wt=self.wt,ps_f=self.ps_f,
+                                  reshape_output=True,add_padding=False,
+                                  bs=self.nn_bs_list[0],
+                                  tstart=tstart,tend=tend)
+        return inds.cpu()
 
 
 class ImCnn(nn.Module):
@@ -450,7 +437,7 @@ class ImCnn(nn.Module):
         seq_valid_full = seq_in[..., 43:-43, 43:-43]
         seq_valid = seq_valid_full[..., 0, :, :]
         seq_valid_full = seq_valid_full.squeeze(-3)
-        
+
         in_weights = (in_layers - in_layers[:, 0:1, ...]) ** 2
         b, n, f, v, h = in_weights.shape
         in_weights = in_weights.view(b, n, f // 3, 3, v, h).mean(2)
@@ -592,12 +579,33 @@ class TfNet3D(nn.Module):
 class TfNet(nn.Module):
     def __init__(self):
         super(TfNet, self).__init__()
-        
         self.conv_net = TfNet3D()
-    
+
+    def test_forward(self, noisy, deno0, device="cuda:0"):
+        t,c,h,w,device = *noisy.shape,noisy.device
+        deno_vid = th.zeros_like(deno0)
+        cat_vid = torch.cat((noisy, deno0), dim=-3)
+        cat_vid = proposed_tf_pad(cat_vid).to(device)
+        with th.no_grad():
+            for t_s in range(cat_vid.shape[0] - 6):
+                sliding_window = cat_vid[t_s:(t_s + 7), ...].to(device)
+                deno_t = self(sliding_window).clamp(min=0, max=1)
+                deno_vid[t_s, ...] = deno_t
+        return deno_vid
+
     def forward(self, x):
+        x = rearrange(x,'t c h w -> 1 c t h w')
         xn = x[:, 3:6, 3, :, :].clone()
         x = self.conv_net(x)
-        x = xn - x
+        x = xn - x # 1 c h w
+        x = rearrange(x,'1 c h w -> 1 c h w')
 
         return x
+
+def proposed_tf_pad(in_seq, pad=3):
+    device = in_seq.device
+    in_seq = in_seq.cpu()
+    in_seq = rearrange(in_seq,'t c h w -> 1 c t h w')
+    out = reflection_pad_t_3d(in_seq, pad)
+    out = rearrange(out,'1 c t h w -> t c h w')
+    return out.to(device)

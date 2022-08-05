@@ -35,6 +35,7 @@ def replication_pad_3d(in_seq, pad):
 def reflection_pad_t_3d(in_seq, pad):
     mode = 'reflect' if pad > 1 else 'replicate'
     pad = [pad, pad]
+    torch.cuda.synchronize()
 
     b, c, t, v, h = in_seq.shape
     in_seq = in_seq.permute(0, 3, 4, 1, 2).reshape(b * v * h, c, t)

@@ -1,4 +1,6 @@
+"""
 
+"""
 
 # -- original --
 import numpy as np
@@ -16,11 +18,12 @@ from dnls.utils import get_nums_hw
 
 def run(vid,flows,k=15,ps=15,pt=1,ws=10,wt=0,dilation=1,stride0=1,stride1=1,
         ps_f=7,use_k=True,reflect_bounds=True,use_prop_nn=True,reshape_output=True,
-        add_padding=True,bs=None,tstart=None,tend=None):
+        add_padding=True,ngpus=2,bs_list=None,tstart=None,tend=None):
     """
     The proposed nn search.
 
     """
+    print(bs_list)
 
     # -- include padding --
     device = vid.device # default device
@@ -42,14 +45,13 @@ def run(vid,flows,k=15,ps=15,pt=1,ws=10,wt=0,dilation=1,stride0=1,stride1=1,
     # -- unpack --
     # print("h,w: ",h,w)
     fflow,bflow = get_flows(flows,vid.shape)
-    fflow,bflow = compute_flows(vid)#flowd
 
     # -- init search --
     h0_off,w0_off = 0,0
     h1_off,w1_off = 0,0
     use_adj,search_abs,exact = False,False,False
     ws = ws if use_prop_nn else 10
-    ps = 11
+    print("info: ",ws,wt,ps,pt)
     search = dnls.search.init("l2_with_index",
                               fflow, bflow, k, ps, pt,
                               ws, wt, dilation=dilation,
@@ -73,39 +75,49 @@ def run(vid,flows,k=15,ps=15,pt=1,ws=10,wt=0,dilation=1,stride0=1,stride1=1,
     qend = ntotal + qstart
     # print("info: ",qstart,qend,tstart,tend)
 
+    # -- init data on devices --
+    if bs_list is None:
+        bs_list = [128*1024,156*1024]#,48*1024]
+    batch_sizes = bs_list
+    vid_gpus = [vid.to(d) for d in get_devices(ngpus)]
+
     # -- batchsize info --
-    MAX_NBATCH = min(128*1024,ntotal)
-    nbatch = 128*1024 if bs is None else bs
-    nbatch = min(nbatch,MAX_NBATCH)
+    nbatch = np.sum(batch_sizes).item()
+    nbatch = min(nbatch,ntotal)
     nbatches = (ntotal - 1)//nbatch + 1
-    # print(th.cuda.memory_reserved()/(1024.**3))
-    # print(th.cuda.memory_allocated()/(1024.**3))
-    # print(ws,wt,k,ps,pt,nbatch,qstart,qend,tstart,tend)
 
     # -- run for batches --
     qindex = qstart
     dists,inds = [],[]
     for batch_index in range(nbatches):
+
+        # -- info --
         if (batch_index+1) % 25 == 0:
             print("%d/%d" % (batch_index+1,nbatches))
 
-        # -- get batch info --
-        nbatch_i =  min(nbatch, qend - qindex)
+        # -- multi gpu id --
+        for gpu_id in range(ngpus):
 
-        # -- run search --
-        dists_i,inds_i = search(vid,qindex,nbatch_i)
-        dists_i /= c
+            # -- get batch info --
+            nbatch_i = batch_sizes[gpu_id]
+            nbatch_i = min(nbatch_i, qend - qindex)
+            if nbatch_i == 0: continue
 
-        # -- accumulate --
-        dists.append(dists_i.cpu())
-        inds.append(inds_i.cpu())
+            # -- run search --
+            vid_i = vid_gpus[gpu_id]
+            dists_i,inds_i = search(vid_i,qindex,nbatch_i)
+            dists_i /= c
 
-        # -- update --
-        qindex += nbatch_i
+            # -- accumulate --
+            dists.append(dists_i.cpu())
+            inds.append(inds_i.cpu())
+
+            # -- incriment --
+            qindex += nbatch_i
 
     # -- group --
-    dists = th.cat(dists).to(device)
-    inds = th.cat(inds).to(device)
+    dists = th.cat(dists)#.to(device)
+    inds = th.cat(inds)#.to(device)
 
     # -- for testing --
     # print("inds.shape: ",inds.shape) # 128 + 6 = 134
@@ -119,6 +131,18 @@ def run(vid,flows,k=15,ps=15,pt=1,ws=10,wt=0,dilation=1,stride0=1,stride1=1,
     # print(inds[0,0,0,:3])
 
     return dists,inds
+
+def get_devices(ngpus):
+    devices = []
+    for index in range(ngpus):
+        device = 'cuda:%d' % index
+        devices.append(device)
+    return devices
+
+def get_device(index,ngpus):
+    gpu_id = index % ngpus
+    device = 'cuda:%d' % gpu_id
+    return device
 
 def reshape_nn_pair(dists,inds,vshape):
     t,c,h,w = vshape
@@ -142,15 +166,3 @@ def get_flows(flows,vshape):
         pads = [pad_h,pad_h,pad_w,pad_w]
         bflow = nn_func.pad(bflow, pads, mode='constant',value=0)
     return fflow,bflow
-
-def compute_flows(vid):
-    import svnlb
-    device = vid.device
-    vid_np = vid.cpu().numpy()
-    if vid_np.shape[1] == 1:
-        vid_np = np.repeat(vid_np,3,axis=1)
-    flows = svnlb.compute_flow(vid_np,50.)
-    fflow = th.from_numpy(flows.fflow).to(device)
-    bflow = th.from_numpy(flows.bflow).to(device)
-    return fflow,bflow
-

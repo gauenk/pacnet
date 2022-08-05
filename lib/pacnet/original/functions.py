@@ -130,7 +130,7 @@ def denoise_video_sequence(noisy_vid, vid_name, sigma, \
     clipped_noise=False, gpu_usage=0, silent=False):
     s_cnn = VidCnn()
 
-    if gpu_usage == 2: 
+    if gpu_usage == 2:
         if torch.cuda.is_available():
             s_cnn.cuda()
         else:

@@ -12,16 +12,16 @@ def run(vid, inds, nsearch=15, ps_s=15, ps_f=7, add_padding=True, testing=False)
     pad_r = ps_f//2 + ps_f
     pad_c = (nsearch-1)//2
     pad_f = pad_r + pad_c
-    print(pad_r,pad_c)
+    # print(pad_r,pad_c)
     if add_padding:
         vid = nn_func.pad(vid, [pad_r,]*4, mode='reflect')
         vid = nn_func.pad(vid, [pad_c,]*4, mode='constant',value=-1)
         vid = vid[...,4:-4,4:-4].contiguous()
     t,c,hp0,wp0 = vid.shape
     h,w = hp0-2*(pad_f-4),wp0-2*(pad_f-4)
-    print("[new pad] vid.shape: ",vid.shape)
-    print("h,w: ",h,w,hp0,wp0)
-    print("inds.shape: ",inds.shape)
+    # print("[new pad] vid.shape: ",vid.shape)
+    # print("h,w: ",h,w,hp0,wp0)
+    # print("inds.shape: ",inds.shape)
 
     # -- shift inds --
     inds[...,1] = inds[...,1] - 4
@@ -34,7 +34,7 @@ def run(vid, inds, nsearch=15, ps_s=15, ps_f=7, add_padding=True, testing=False)
     unfold_k = dnls.UnfoldK(ps_f,pt=pt,dilation=dil,
                             adj=adj,reflect_bounds=r_bounds)
     # -- unfold --
-    _,inds_h,inds_w,_,_ = inds.shape
+    t,inds_h,inds_w,_,_ = inds.shape
     inds = rearrange(inds,'t h w k tr -> (t h w) k tr')
     patches = unfold_k(vid,inds)
 
@@ -45,7 +45,7 @@ def run(vid, inds, nsearch=15, ps_s=15, ps_f=7, add_padding=True, testing=False)
 
     # -- decl dim info --
     nh,nw = (h-1)//ps_f + 1,(w-1)//ps_f + 1
-    print("nh,nw: ",nh,nw)
+    # print("nh,nw: ",nh,nw)
     k = patches.shape[3]
     ps = ps_f
     pdim = ps*ps*c
@@ -97,7 +97,7 @@ def run(vid, inds, nsearch=15, ps_s=15, ps_f=7, add_padding=True, testing=False)
     # -- extract center --
     ps2 = (ps_f-1)
     sim_vids = sim_vids[...,ps2:-ps2,ps2:-ps2]
-    print("Any nan? ",th.any(th.isnan(sim_vids)).item())
+    # print("Any nan? ",th.any(th.isnan(sim_vids)).item())
 
     # -- final reshape [testing only] --
     if testing:
